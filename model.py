@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+
+
 # Hyperparameters
 batch_size = 4  # How many batches per training step
 context_length = 16  # Length of the token chunk each batch
@@ -18,8 +20,9 @@ max_iters = 5000  # Total of training iterations <- Change this to smaller numbe
 eval_interval = 50  # How often to evaluate
 eval_iters = 20  # Number of iterations to average for evaluation
 device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Use GPU if it's available.
-TORCH_SEED = 1337
+TORCH_SEED = 3721 #1337 CX: if retrain the model using the same seed, the result will be exactly the same.
 torch.manual_seed(TORCH_SEED)
+
 
 # Load training data
 if not os.path.exists('data/sales_textbook.txt'):
@@ -166,7 +169,7 @@ class TransformerLanguageModel(nn.Module):
         """
         position_encoding_lookup_table = torch.zeros(self.context_length, self.d_model)
         position = torch.arange(0, self.context_length, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model))
+        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(100.0) / self.d_model)) #original 10000.0
         position_encoding_lookup_table[:, 0::2] = torch.sin(position * div_term)
         position_encoding_lookup_table[:, 1::2] = torch.cos(position * div_term)
         # change position_encoding_lookup_table from (context_length, d_model) to (T, d_model)
@@ -203,61 +206,66 @@ class TransformerLanguageModel(nn.Module):
         return idx
 
 
-# Initialize the model
-model = TransformerLanguageModel()
-model = model.to(device)
+if __name__ == "__main__":
+
+    # Initialize the model
+    model = TransformerLanguageModel()
+    model = model.to(device)
+
+    # Save the model state dictionary
+    torch.save(model.state_dict(), 'model-ckpt_b0.pt')
 
 
-# Get input embedding batch
-def get_batch(split: str):
-    data = train_data if split == 'train' else val_data
-    idxs = torch.randint(low=0, high=len(data) - context_length, size=(batch_size,))
-    x = torch.stack([data[idx:idx + context_length] for idx in idxs]).to(device)
-    y = torch.stack([data[idx + 1:idx + context_length + 1] for idx in idxs]).to(device)
-    return x, y
+    # Get input embedding batch
+    def get_batch(split: str):
+        data = train_data if split == 'train' else val_data
+        idxs = torch.randint(low=0, high=len(data) - context_length, size=(batch_size,))
+        x = torch.stack([data[idx:idx + context_length] for idx in idxs]).to(device)
+        y = torch.stack([data[idx + 1:idx + context_length + 1] for idx in idxs]).to(device)
+        return x, y
 
 
-# Calculate loss
-@torch.no_grad()
-def estimate_loss():
-    out = {}
+    # Calculate loss
+    @torch.no_grad()
+    def estimate_loss():
+        out = {}
+        model.eval()
+        for split in ['train', 'valid']:
+            losses = torch.zeros(eval_iters)
+            for k in range(eval_iters):
+                x_batch, y_batch = get_batch(split)
+                logits, loss = model(x_batch, y_batch)
+                losses[k] = loss.item()
+            out[split] = losses.mean()
+        model.train()
+        return out
+
+
+    # Use AdamW optimizer
+    optimizer = torch.optim.AdamW(params=model.parameters(), lr=learning_rate)
+    tracked_losses = list()
+    for step in range(max_iters):
+        if step % eval_iters == 0 or step == max_iters - 1:
+            losses = estimate_loss()
+            tracked_losses.append(losses)
+            print('Step:', step, 'Training Loss:', round(losses['train'].item(), 3), 'Validation Loss:',
+                round(losses['valid'].item(), 3))
+
+        xb, yb = get_batch('train')
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    # Save the model state dictionary
+    torch.save(model.state_dict(), 'model-ckpt_b1.pt')
+
+    # Generate
     model.eval()
-    for split in ['train', 'valid']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            x_batch, y_batch = get_batch(split)
-            logits, loss = model(x_batch, y_batch)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-
-# Use AdamW optimizer
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=learning_rate)
-tracked_losses = list()
-for step in range(max_iters):
-    if step % eval_iters == 0 or step == max_iters - 1:
-        losses = estimate_loss()
-        tracked_losses.append(losses)
-        print('Step:', step, 'Training Loss:', round(losses['train'].item(), 3), 'Validation Loss:',
-              round(losses['valid'].item(), 3))
-
-    xb, yb = get_batch('train')
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-# Save the model state dictionary
-torch.save(model.state_dict(), 'model-ckpt.pt')
-
-# Generate
-model.eval()
-start = 'The salesperson'
-start_ids = encoding.encode(start)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-y = model.generate(x, max_new_tokens=100)
-print('---------------')
-print(encoding.decode(y[0].tolist()))
-print('---------------')
+    start = 'The salesperson'
+    start_ids = encoding.encode(start)
+    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+    y = model.generate(x, max_new_tokens=100)
+    print('---------------')
+    print(encoding.decode(y[0].tolist()))
+    print('---------------')
